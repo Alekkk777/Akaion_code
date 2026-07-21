@@ -1,0 +1,38 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'Dockerfile.api', '-t', 'gcr.io/$PROJECT_ID/akaion-api', '.']
+
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', 'gcr.io/$PROJECT_ID/akaion-api']
+
+  - name: gcr.io/cloud-builders/gcloud
+    args:
+      - run
+      - deploy
+      - akaion-api
+      - --image=gcr.io/$PROJECT_ID/akaion-api
+      - --region=europe-west1
+      - --platform=managed
+      - --allow-unauthenticated
+      - --set-env-vars=USE_PUBSUB=true,USE_FIRESTORE=true,GCP_PROJECT=$PROJECT_ID,ENVIRONMENT=prod
+
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'Dockerfile.worker', '-t', 'gcr.io/$PROJECT_ID/akaion-worker', '.']
+
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', 'gcr.io/$PROJECT_ID/akaion-worker']
+
+  - name: gcr.io/cloud-builders/gcloud
+    args:
+      - run
+      - deploy
+      - akaion-worker
+      - --image=gcr.io/$PROJECT_ID/akaion-worker
+      - --region=europe-west1
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --set-env-vars=USE_PUBSUB=true,USE_FIRESTORE=true,GCP_PROJECT=$PROJECT_ID,ENVIRONMENT=prod
+
+images:
+  - gcr.io/$PROJECT_ID/akaion-api
+  - gcr.io/$PROJECT_ID/akaion-worker

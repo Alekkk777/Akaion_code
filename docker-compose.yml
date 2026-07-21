@@ -1,0 +1,46 @@
+services:
+  firestore-emulator:
+    image: google/cloud-sdk:emulators
+    command: gcloud emulators firestore start --host-port=0.0.0.0:8200
+    ports:
+      - "8200:8200"
+
+  pubsub-emulator:
+    image: google/cloud-sdk:emulators
+    command: gcloud emulators pubsub start --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      - GCP_PROJECT=akaion-dev
+      - USE_PUBSUB=true
+      - USE_FIRESTORE=true
+      - PUBSUB_EMULATOR_HOST=pubsub-emulator:8085
+      - FIRESTORE_EMULATOR_HOST=firestore-emulator:8200
+      - ENVIRONMENT=local
+    ports:
+      - "8000:8080"
+    depends_on:
+      - firestore-emulator
+      - pubsub-emulator
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - GCP_PROJECT=akaion-dev
+      - USE_PUBSUB=true
+      - USE_FIRESTORE=true
+      - PUBSUB_EMULATOR_HOST=pubsub-emulator:8085
+      - FIRESTORE_EMULATOR_HOST=firestore-emulator:8200
+      - ENVIRONMENT=local
+    ports:
+      - "8001:8080"
+    depends_on:
+      - firestore-emulator
+      - pubsub-emulator
