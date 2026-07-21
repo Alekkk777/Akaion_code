@@ -72,6 +72,12 @@ app/
 tests/
 ├── unit/                          # planner, executor, registry in isolamento
 └── integration/                   # API end-to-end via httpx.AsyncClient
+
+infra/                              # Terraform: infrastruttura GCP (vedi sezione Deployment)
+├── main.tf
+├── variables.tf
+├── outputs.tf
+└── providers.tf
 ```
 
 ## Setup e avvio in locale
@@ -130,29 +136,59 @@ deployate come due servizi Cloud Run indipendenti (scalano in modo indipendente:
 l'API risponde subito e scala su traffico HTTP, il worker scala sul volume di
 messaggi Pub/Sub).
 
+**Terraform possiede l'infrastruttura** (API abilitate, Artifact Registry,
+Firestore, topic/subscription Pub/Sub, service account e IAM binding, i due
+servizi Cloud Run) — **Cloud Build possiede i deploy applicativi** (build,
+push, `gcloud run deploy` con l'immagine aggiornata). Questa separazione evita
+che i due processi si "contendano" lo stesso campo (l'immagine del container
+è in `lifecycle.ignore_changes` lato Terraform per questo motivo).
+
+Verificato con un deploy reale end-to-end (creato con Terraform, buildato e
+testato con Cloud Build + curl, poi distrutto con `terraform destroy` a fine
+verifica) — vedi `infra/`.
+
+### 1. Provisioning infrastruttura (una tantum, o ad ogni cambio infra)
+
+```bash
+cd infra
+cp terraform.tfvars.example terraform.tfvars   # imposta project_id
+
+gcloud auth application-default login           # credenziali usate da Terraform
+terraform init
+terraform plan   -out=tfplan                    # rivedi cosa verrebbe creato
+terraform apply  tfplan
+```
+
+Al primo apply i due servizi Cloud Run partono con un'immagine placeholder
+(`us-docker.pkg.dev/cloudrun/container/hello`): è normale, il passo successivo
+la sostituisce con quella reale.
+
+### 2. Build & deploy applicativo (ad ogni cambio di codice)
+
 ```bash
 gcloud builds submit --config cloudbuild.yaml
 ```
 
-`cloudbuild.yaml` esegue: build + push su Container Registry, deploy di
-`akaion-api` (pubblico) e `akaion-worker` (privato, invocabile solo dalla
-push subscription).
+`cloudbuild.yaml` compila entrambe le immagini, le pusha su Artifact Registry
+(`europe-west1-docker.pkg.dev/<project>/akaion-lifeos/...`) e aggiorna
+`akaion-api` e `akaion-worker` con `gcloud run deploy --image=...` (senza
+toccare IAM/env vars, già gestiti da Terraform).
 
-Setup one-off della subscription (dopo il primo deploy):
+### 3. Decommissioning
 
 ```bash
-WORKER_URL=$(gcloud run services describe akaion-worker --region=europe-west1 --format='value(status.url)')
-
-gcloud pubsub topics create workflow-created
-
-gcloud pubsub subscriptions create workflow-created-sub \
-  --topic=workflow-created \
-  --push-endpoint="${WORKER_URL}/pubsub/push" \
-  --push-auth-service-account=<SERVICE_ACCOUNT_EMAIL>
+cd infra
+terraform destroy
 ```
 
-Il service account usato per l'auth della push subscription deve avere il
-ruolo `roles/run.invoker` su `akaion-worker`.
+Nota: `google_firestore_database` ha `deletion_policy = "ABANDON"` (comportamento
+di default del provider, per evitare cancellazioni accidentali di dati) — un
+`terraform destroy` lo rimuove dallo stato ma **non** cancella il database
+Firestore reale. Per eliminarlo davvero:
+
+```bash
+gcloud firestore databases delete --database='(default)' --project=<PROJECT_ID>
+```
 
 ### Persistenza
 
@@ -175,6 +211,10 @@ nessuna migrazione di schema richiesta (document-oriented), la stessa
   testare l'intera logica di planning/execution senza alcuna dipendenza
   esterna, mantenendo lo stesso identico codice di dominio quando si passa
   alla configurazione cloud-native completa.
+- **Endpoint di health check su `/health`, non `/healthz`**: `/healthz` è un path
+  riservato a livello di infrastruttura Google (intercettato dal Google Frontend
+  prima di raggiungere il container, verificato in deploy reale su Cloud Run) —
+  qualunque altro path, incluso `/health`, arriva regolarmente all'app.
 - **Planner rule-based invece di LLM-based**: l'interfaccia (`intent -> list[TaskStep]`)
   è la stessa che userebbe un planner basato su LLM con function calling;
   la versione rule-based è deterministica, testabile senza costi/latenza
@@ -191,4 +231,4 @@ Endpoint principali:
 |---|---|---|
 | POST | `/api/v1/workflows` | Crea un workflow da un intent, ritorna 202 + `workflow_id` |
 | GET | `/api/v1/workflows/{id}` | Stato e risultato del workflow |
-| GET | `/healthz` | Health check |
+| GET | `/health` | Health check |

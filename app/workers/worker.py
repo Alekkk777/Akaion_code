@@ -11,8 +11,8 @@ register_services()
 app = FastAPI(title="Akaion LifeOS — Worker")
 
 
-@app.get("/healthz", tags=["system"])
-async def healthz() -> dict:
+@app.get("/health", tags=["system"])
+async def health() -> dict:
     return {"status": "ok"}
 
 

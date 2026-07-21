@@ -1,38 +1,39 @@
+substitutions:
+  _REGION: europe-west1
+  _REPO: akaion-lifeos
+
 steps:
   - name: gcr.io/cloud-builders/docker
-    args: ['build', '-f', 'Dockerfile.api', '-t', 'gcr.io/$PROJECT_ID/akaion-api', '.']
+    args: ['build', '-f', 'Dockerfile.api', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/akaion-api', '.']
 
   - name: gcr.io/cloud-builders/docker
-    args: ['push', 'gcr.io/$PROJECT_ID/akaion-api']
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/akaion-api']
 
+  # L'infra (servizio, IAM, env vars) e' gestita da Terraform (infra/); qui aggiorniamo solo l'immagine.
   - name: gcr.io/cloud-builders/gcloud
     args:
       - run
       - deploy
       - akaion-api
-      - --image=gcr.io/$PROJECT_ID/akaion-api
-      - --region=europe-west1
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/akaion-api
+      - --region=${_REGION}
       - --platform=managed
-      - --allow-unauthenticated
-      - --set-env-vars=USE_PUBSUB=true,USE_FIRESTORE=true,GCP_PROJECT=$PROJECT_ID,ENVIRONMENT=prod
 
   - name: gcr.io/cloud-builders/docker
-    args: ['build', '-f', 'Dockerfile.worker', '-t', 'gcr.io/$PROJECT_ID/akaion-worker', '.']
+    args: ['build', '-f', 'Dockerfile.worker', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/akaion-worker', '.']
 
   - name: gcr.io/cloud-builders/docker
-    args: ['push', 'gcr.io/$PROJECT_ID/akaion-worker']
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/akaion-worker']
 
   - name: gcr.io/cloud-builders/gcloud
     args:
       - run
       - deploy
       - akaion-worker
-      - --image=gcr.io/$PROJECT_ID/akaion-worker
-      - --region=europe-west1
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/akaion-worker
+      - --region=${_REGION}
       - --platform=managed
-      - --no-allow-unauthenticated
-      - --set-env-vars=USE_PUBSUB=true,USE_FIRESTORE=true,GCP_PROJECT=$PROJECT_ID,ENVIRONMENT=prod
 
 images:
-  - gcr.io/$PROJECT_ID/akaion-api
-  - gcr.io/$PROJECT_ID/akaion-worker
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/akaion-api
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/akaion-worker

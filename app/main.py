@@ -30,6 +30,6 @@ app.add_exception_handler(PlanningError, planning_error_handler)
 app.include_router(workflows.router, prefix="/api/v1")
 
 
-@app.get("/healthz", tags=["system"])
-async def healthz() -> dict:
+@app.get("/health", tags=["system"])
+async def health() -> dict:
     return {"status": "ok", "environment": settings.environment}
