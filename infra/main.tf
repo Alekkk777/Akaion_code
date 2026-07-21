@@ -51,6 +51,7 @@ resource "google_pubsub_topic" "workflow_created" {
 }
 
 # Service account dedicato che la push subscription usa per autenticarsi verso il worker
+# (identità usata SOLO per l'invocazione push, non è la runtime identity del container)
 resource "google_service_account" "pubsub_invoker" {
   account_id   = "akaion-pubsub-invoker"
   display_name = "SA push subscription -> akaion-worker"
@@ -63,6 +64,46 @@ resource "google_project_iam_member" "pubsub_token_creator" {
   member  = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
 
+# --- Runtime service account per il servizio api: ruoli minimi (Firestore r/w + publish su Pub/Sub) ---
+
+resource "google_service_account" "api_runtime" {
+  account_id   = "akaion-api-runtime"
+  display_name = "Runtime SA del servizio Cloud Run api"
+}
+
+resource "google_project_iam_member" "api_datastore_user" {
+  project = var.project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.api_runtime.email}"
+}
+
+resource "google_project_iam_member" "api_pubsub_publisher" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_service_account.api_runtime.email}"
+}
+
+# --- Runtime service account per il servizio worker: ruoli minimi (Firestore r/w + subscriber) ---
+
+resource "google_service_account" "worker_runtime" {
+  account_id   = "akaion-worker-runtime"
+  display_name = "Runtime SA del servizio Cloud Run worker"
+}
+
+resource "google_project_iam_member" "worker_datastore_user" {
+  project = var.project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.worker_runtime.email}"
+}
+
+# Non strettamente necessario per la consegna push (autenticata via OIDC, non via pull),
+# incluso per coerenza con un eventuale passaggio futuro a pull subscription.
+resource "google_project_iam_member" "worker_pubsub_subscriber" {
+  project = var.project_id
+  role    = "roles/pubsub.subscriber"
+  member  = "serviceAccount:${google_service_account.worker_runtime.email}"
+}
+
 # --- Cloud Run: servizio api (pubblico) ---
 
 resource "google_cloud_run_v2_service" "api" {
@@ -72,6 +113,8 @@ resource "google_cloud_run_v2_service" "api" {
   deletion_protection = false
 
   template {
+    service_account = google_service_account.api_runtime.email
+
     containers {
       image = var.api_image
 
@@ -124,6 +167,8 @@ resource "google_cloud_run_v2_service" "worker" {
   deletion_protection = false
 
   template {
+    service_account = google_service_account.worker_runtime.email
+
     containers {
       image = var.worker_image
 

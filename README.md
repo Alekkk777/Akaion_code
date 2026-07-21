@@ -129,7 +129,7 @@ docker compose up --build
 - `USE_PUBSUB=true` e `USE_FIRESTORE=true` puntano agli emulatori tramite
   `PUBSUB_EMULATOR_HOST` / `FIRESTORE_EMULATOR_HOST`
 
-## Deployment su GCP
+## Deployment instructions for GCP
 
 Due immagini Docker dallo stesso codebase (`Dockerfile.api`, `Dockerfile.worker`),
 deployate come due servizi Cloud Run indipendenti (scalano in modo indipendente:
@@ -137,15 +137,31 @@ l'API risponde subito e scala su traffico HTTP, il worker scala sul volume di
 messaggi Pub/Sub).
 
 **Terraform possiede l'infrastruttura** (API abilitate, Artifact Registry,
-Firestore, topic/subscription Pub/Sub, service account e IAM binding, i due
+Firestore, topic/subscription Pub/Sub, service account con ruoli minimi, i due
 servizi Cloud Run) — **Cloud Build possiede i deploy applicativi** (build,
 push, `gcloud run deploy` con l'immagine aggiornata). Questa separazione evita
 che i due processi si "contendano" lo stesso campo (l'immagine del container
 è in `lifecycle.ignore_changes` lato Terraform per questo motivo).
 
-Verificato con un deploy reale end-to-end (creato con Terraform, buildato e
-testato con Cloud Build + curl, poi distrutto con `terraform destroy` a fine
-verifica) — vedi `infra/`.
+Procedura verificata con un deploy reale end-to-end su un progetto GCP: infra
+applicata con Terraform, build+deploy con Cloud Build, workflow completo
+testato via curl attraverso Pub/Sub fino al worker, poi tutto distrutto con
+`terraform destroy`.
+
+### Prerequisiti
+
+1. **Account GCP con billing abilitato** su un progetto (nuovo o esistente).
+   ```bash
+   gcloud billing accounts list
+   gcloud billing projects link <PROJECT_ID> --billing-account=<BILLING_ACCOUNT_ID>
+   ```
+2. **gcloud CLI** installato e autenticato:
+   ```bash
+   gcloud auth login                       # identità utente per i comandi gcloud
+   gcloud config set project <PROJECT_ID>
+   gcloud auth application-default login   # credenziali usate da Terraform e dai client Python (ADC)
+   ```
+3. **Terraform** >= 1.5 installato (`brew install hashicorp/tap/terraform` o binario da [releases.hashicorp.com](https://releases.hashicorp.com/terraform/)).
 
 ### 1. Provisioning infrastruttura (una tantum, o ad ogni cambio infra)
 
@@ -153,15 +169,25 @@ verifica) — vedi `infra/`.
 cd infra
 cp terraform.tfvars.example terraform.tfvars   # imposta project_id
 
-gcloud auth application-default login           # credenziali usate da Terraform
 terraform init
 terraform plan   -out=tfplan                    # rivedi cosa verrebbe creato
 terraform apply  tfplan
 ```
 
-Al primo apply i due servizi Cloud Run partono con un'immagine placeholder
-(`us-docker.pkg.dev/cloudrun/container/hello`): è normale, il passo successivo
-la sostituisce con quella reale.
+Crea: API abilitate, Artifact Registry, Firestore (Native), topic + push
+subscription Pub/Sub, 3 service account dedicati (vedi sezione IAM sotto), e i
+due servizi Cloud Run con un'immagine placeholder (`us-docker.pkg.dev/cloudrun/container/hello`
+— è normale, il passo successivo la sostituisce con quella reale).
+
+**Gotcha noti** (incontrati durante il test di deploy, risolti una tantum per progetto):
+
+- *Pub/Sub service agent inesistente*: se il primo `apply` fallisce su
+  `google_project_iam_member.pubsub_token_creator` con `does not exist`, il
+  service agent di Pub/Sub non è stato ancora creato (è lazy). Fix:
+  ```bash
+  gcloud beta services identity create --service=pubsub.googleapis.com --project=<PROJECT_ID>
+  ```
+  poi rilancia `terraform apply`.
 
 ### 2. Build & deploy applicativo (ad ogni cambio di codice)
 
@@ -174,27 +200,61 @@ gcloud builds submit --config cloudbuild.yaml
 `akaion-api` e `akaion-worker` con `gcloud run deploy --image=...` (senza
 toccare IAM/env vars, già gestiti da Terraform).
 
-### 3. Decommissioning
+### 3. Verifica
+
+```bash
+API_URL=$(cd infra && terraform output -raw api_url)
+
+curl "$API_URL/health"
+
+curl -X POST "$API_URL/api/v1/workflows" \
+  -H "Content-Type: application/json" \
+  -d '{"intent": "invia un messaggio a Marco e blocca 30 minuti in calendario", "context": {"to": "Marco"}}'
+# → {"workflow_id": "...", "status": "pending"}
+
+curl "$API_URL/api/v1/workflows/<workflow_id>"
+# → status: completed, dopo il giro api -> Pub/Sub -> worker
+```
+
+### 4. Decommissioning
 
 ```bash
 cd infra
 terraform destroy
 ```
 
-Nota: `google_firestore_database` ha `deletion_policy = "ABANDON"` (comportamento
-di default del provider, per evitare cancellazioni accidentali di dati) — un
-`terraform destroy` lo rimuove dallo stato ma **non** cancella il database
-Firestore reale. Per eliminarlo davvero:
+**Gotcha noti:**
 
-```bash
-gcloud firestore databases delete --database='(default)' --project=<PROJECT_ID>
-```
+- *`cannot destroy service without deletion_protection=false`*: i servizi
+  Cloud Run v2 hanno `deletion_protection = false` esplicito in `main.tf`
+  proprio per evitare questo blocco; se il provider viene aggiornato e il
+  problema ricompare, impostalo e rilancia `apply` prima del `destroy`.
+- *Firestore non viene davvero cancellato*: `google_firestore_database` ha
+  `deletion_policy = "ABANDON"` (default del provider, per evitare
+  cancellazioni accidentali di dati) — `terraform destroy` lo rimuove dallo
+  stato ma **non** cancella il database reale. Per eliminarlo davvero:
+  ```bash
+  gcloud firestore databases delete --database='(default)' --project=<PROJECT_ID>
+  ```
+
+### IAM: service account e ruoli minimi
+
+Tre identità distinte, ciascuna con solo i ruoli che le servono:
+
+| Service account | Usato da | Ruoli | Perché |
+|---|---|---|---|
+| `akaion-api-runtime` | runtime del servizio `akaion-api` | `roles/datastore.user`, `roles/pubsub.publisher` | l'api legge/scrive workflow su Firestore e pubblica l'evento `workflow.created` |
+| `akaion-worker-runtime` | runtime del servizio `akaion-worker` | `roles/datastore.user`, `roles/pubsub.subscriber` | il worker legge/scrive workflow su Firestore; `pubsub.subscriber` non è strettamente necessario per la consegna push (autenticata via OIDC, non via pull) ma incluso per coerenza con un eventuale passaggio a pull subscription |
+| `akaion-pubsub-invoker` | identità della **push subscription**, non del container | `roles/run.invoker` su `akaion-worker` | è il SA che Pub/Sub usa per generare il token OIDC con cui invoca l'endpoint privato `/pubsub/push` |
+
+`akaion-api` resta pubblico (`roles/run.invoker` su `allUsers`); `akaion-worker`
+è invocabile solo dal SA `akaion-pubsub-invoker`.
 
 ### Persistenza
 
-Abilitare Firestore in modalità Native su GCP e impostare `USE_FIRESTORE=true`:
-nessuna migrazione di schema richiesta (document-oriented), la stessa
-`Workflow` pydantic viene serializzata/deserializzata direttamente.
+Firestore in modalità Native, creato da Terraform. Nessuna migrazione di
+schema richiesta (document-oriented), la stessa `Workflow` pydantic viene
+serializzata/deserializzata direttamente.
 
 ## Design decisions
 
@@ -211,6 +271,13 @@ nessuna migrazione di schema richiesta (document-oriented), la stessa
   testare l'intera logica di planning/execution senza alcuna dipendenza
   esterna, mantenendo lo stesso identico codice di dominio quando si passa
   alla configurazione cloud-native completa.
+- **Service account runtime dedicati e distinti dal SA di invocazione Pub/Sub**:
+  `akaion-api-runtime` e `akaion-worker-runtime` hanno solo `datastore.user` +
+  il ruolo Pub/Sub che serve loro (publisher/subscriber) — girare con il
+  Compute Engine default SA avrebbe dato permessi di progetto molto più ampi
+  del necessario. Il terzo SA (`akaion-pubsub-invoker`) è concettualmente
+  diverso: non gira nel container, è l'identità che Pub/Sub usa per firmare i
+  token OIDC verso il worker.
 - **Endpoint di health check su `/health`, non `/healthz`**: `/healthz` è un path
   riservato a livello di infrastruttura Google (intercettato dal Google Frontend
   prima di raggiungere il container, verificato in deploy reale su Cloud Run) —
