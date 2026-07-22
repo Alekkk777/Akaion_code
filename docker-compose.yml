@@ -7,9 +7,23 @@ services:
 
   pubsub-emulator:
     image: google/cloud-sdk:emulators
-    command: gcloud emulators pubsub start --host-port=0.0.0.0:8085
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
     ports:
       - "8085:8085"
+
+  # Crea topic + push subscription sull'emulatore all'avvio (in GCP reale lo fa Terraform).
+  # Gira una volta e esce; api/worker aspettano il suo completamento.
+  pubsub-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: ["python", "scripts/init_pubsub_emulator.py"]
+    environment:
+      - GCP_PROJECT=akaion-dev
+      - PUBSUB_EMULATOR_HOST=pubsub-emulator:8085
+      - PUSH_ENDPOINT=http://worker:8080/pubsub/push
+    depends_on:
+      - pubsub-emulator
 
   api:
     build:
@@ -25,8 +39,12 @@ services:
     ports:
       - "8000:8080"
     depends_on:
-      - firestore-emulator
-      - pubsub-emulator
+      firestore-emulator:
+        condition: service_started
+      pubsub-emulator:
+        condition: service_started
+      pubsub-init:
+        condition: service_completed_successfully
 
   worker:
     build:
@@ -42,5 +60,9 @@ services:
     ports:
       - "8001:8080"
     depends_on:
-      - firestore-emulator
-      - pubsub-emulator
+      firestore-emulator:
+        condition: service_started
+      pubsub-emulator:
+        condition: service_started
+      pubsub-init:
+        condition: service_completed_successfully

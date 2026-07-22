@@ -128,6 +128,12 @@ docker compose up --build
 - API su `localhost:8000`, Worker su `localhost:8001`
 - `USE_PUBSUB=true` e `USE_FIRESTORE=true` puntano agli emulatori tramite
   `PUBSUB_EMULATOR_HOST` / `FIRESTORE_EMULATOR_HOST`
+- Un servizio `pubsub-init` (vedi `scripts/init_pubsub_emulator.py`) crea topic
+  e push subscription sull'emulatore all'avvio, poi esce — in GCP reale questo
+  lo fa Terraform, qui serve rifarlo perché lo stato dell'emulatore non persiste
+  tra un `docker compose down` e l'altro.
+- Verificato con un workflow reale end-to-end attraverso l'emulatore Pub/Sub
+  (push delivery inclusa, non solo publish): `api → Pub/Sub → worker → Firestore`.
 
 ## Deployment instructions for GCP
 
